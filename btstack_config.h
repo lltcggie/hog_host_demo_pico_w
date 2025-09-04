@@ -16,6 +16,9 @@
 #define MAX_NR_GATT_CLIENTS 1
 #define MAX_NR_HIDS_CLIENTS 1
 
+#define ENABLE_LE_SECURE_CONNECTIONS
+#define ENABLE_LE_PROACTIVE_AUTHENTICATION
+
 // BTstack configuration. buffers, sizes, ...
 #define HCI_OUTGOING_PRE_BUFFER_SIZE 4
 #define HCI_ACL_PAYLOAD_SIZE (255 + 4)

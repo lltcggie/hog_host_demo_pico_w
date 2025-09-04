@@ -413,22 +413,28 @@ static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *pack
                     hog_connect();
                     break;
                 case HCI_EVENT_DISCONNECTION_COMPLETE:
-                    if (app_state != READY) break;
-                    connection_handle = HCI_CON_HANDLE_INVALID;
-                    switch (app_state){
-                        case READY:
-                            printf("\nDisconnected, try to reconnect...\n");
-                            app_state = W4_TIMEOUT_THEN_RECONNECT;
-                            break;
-                        default:
-                            printf("\nDisconnected, start over...\n");
-                            app_state = W4_TIMEOUT_THEN_SCAN;
-                            break;
+                    if (app_state == W4_ENCRYPTED) {
+                        printf("HID service client connection failed.\n");
+                        handle_outgoing_connection_error();
+                        connection_handle = HCI_CON_HANDLE_INVALID;
                     }
-                    // set timer
-                    btstack_run_loop_set_timer(&connection_timer, 100);
-                    btstack_run_loop_set_timer_handler(&connection_timer, &hog_reconnect_timeout);
-                    btstack_run_loop_add_timer(&connection_timer);
+                    else if (app_state == READY) {
+                        connection_handle = HCI_CON_HANDLE_INVALID;
+                        switch (app_state){
+                            case READY:
+                                printf("\nDisconnected, try to reconnect...\n");
+                                app_state = W4_TIMEOUT_THEN_RECONNECT;
+                                break;
+                            default:
+                                printf("\nDisconnected, start over...\n");
+                                app_state = W4_TIMEOUT_THEN_SCAN;
+                                break;
+                        }
+                        // set timer
+                        btstack_run_loop_set_timer(&connection_timer, 100);
+                        btstack_run_loop_set_timer_handler(&connection_timer, &hog_reconnect_timeout);
+                        btstack_run_loop_add_timer(&connection_timer);
+                    }
                     break;
                 case HCI_EVENT_META_GAP:
                     // wait for connection complete
@@ -465,19 +471,22 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
 
     if (packet_type != HCI_EVENT_PACKET) return;
 
+    bd_addr_t addr;
+    bd_addr_type_t addr_type;
     bool connect_to_service = false;
 
-    switch (hci_event_packet_get_type(packet)) {
+    uint8_t event = hci_event_packet_get_type(packet);
+    switch (event) {
         case SM_EVENT_JUST_WORKS_REQUEST:
             printf("Just works requested\n");
             sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
             break;
         case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
-            printf("Confirming numeric comparison: %"PRIu32"\n", sm_event_numeric_comparison_request_get_passkey(packet));
+            printf("Confirming numeric comparison: %06"PRIu32"\n", sm_event_numeric_comparison_request_get_passkey(packet));
             sm_numeric_comparison_confirm(sm_event_passkey_display_number_get_handle(packet));
             break;
         case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
-            printf("Display Passkey: %"PRIu32"\n", sm_event_passkey_display_number_get_passkey(packet));
+            printf("Display Passkey: %06"PRIu32"\n", sm_event_passkey_display_number_get_passkey(packet));
             break;
         case SM_EVENT_PAIRING_COMPLETE:
             switch (sm_event_pairing_complete_get_status(packet)){
@@ -499,7 +508,32 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
             }
             break;
         case SM_EVENT_REENCRYPTION_COMPLETE:
-            printf("Re-encryption complete, success\n");
+            switch (sm_event_reencryption_complete_get_status(packet)){
+                case ERROR_CODE_SUCCESS:
+                    printf("Re-encryption complete, success\n");
+                    break;
+                case ERROR_CODE_CONNECTION_TIMEOUT:
+                    printf("Re-encryption failed, timeout\n");
+                    break;
+                case ERROR_CODE_REMOTE_USER_TERMINATED_CONNECTION:
+                    printf("Re-encryption failed, disconnected\n");
+                    printf("Deleting local bonding information...\n");
+                    sm_event_reencryption_complete_get_address(packet, addr);
+                    addr_type = sm_event_reencryption_started_get_addr_type(packet);
+                    gap_delete_bonding(addr_type, addr);
+                    break;
+                case ERROR_CODE_PIN_OR_KEY_MISSING:
+                    printf("Re-encryption failed, bonding information missing\n\n");
+                    printf("Assuming remote lost bonding information\n");
+                    printf("Deleting local bonding information and start new pairing...\n");
+                    sm_event_reencryption_complete_get_address(packet, addr);
+                    addr_type = sm_event_reencryption_started_get_addr_type(packet);
+                    gap_delete_bonding(addr_type, addr);
+                    sm_request_pairing(sm_event_reencryption_complete_get_handle(packet));
+                    break;
+                default:
+                    break;
+            }
             connect_to_service = true;
             break;
         default:
@@ -528,6 +562,23 @@ int main(int argc, const char * argv[]){
         return -1;
     }
 
+#if WANT_HCI_DUMP
+    // disable HCI packet dump
+    hci_dump_enable_packet_log(false);
+#endif
+
+#if 0
+    // Clear Pairings
+    btstack_tlv_get_instance(&btstack_tlv_singleton_impl, &btstack_tlv_singleton_context);
+    if (btstack_tlv_singleton_impl){
+        btstack_tlv_singleton_impl->delete_tag(btstack_tlv_singleton_context, TLV_TAG_HOGD);
+    }
+
+    for (int i = 0; i < le_device_db_max_count(); i++){
+        le_device_db_remove(i);
+    }
+#endif
+
     /* LISTING_START(HogBootHostSetup): HID-over-GATT Host Setup */
 
     l2cap_init();
@@ -535,7 +586,7 @@ int main(int argc, const char * argv[]){
     // setup SM: Display only
     sm_init();
     sm_set_io_capabilities(IO_CAPABILITY_DISPLAY_ONLY);
-    sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_BONDING);
+    sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_BONDING | SM_AUTHREQ_MITM_PROTECTION);
 
     //
     gatt_client_init();
@@ -552,7 +603,6 @@ int main(int argc, const char * argv[]){
     // register for events from Security Manager
     sm_event_callback_registration.callback = &sm_packet_handler;
     sm_add_event_handler(&sm_event_callback_registration);
-    sm_set_authentication_requirements( SM_AUTHREQ_BONDING);
 
     /* LISTING_END */
 
