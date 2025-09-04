@@ -591,6 +591,10 @@ int main(int argc, const char * argv[]){
     //
     gatt_client_init();
 
+    // security settings
+    // https://bluekitchen-gmbh.com/blesa-gatt-client-vulnerabilities/
+    gatt_client_set_required_security_level(LEVEL_3);
+
     // setup ATT server - only needed if LE Peripheral does ATT queries on its own, e.g. Android and iOS
     att_server_init(profile_data, NULL, NULL);
 

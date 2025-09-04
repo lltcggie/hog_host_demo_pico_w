@@ -17,6 +17,8 @@
 #define MAX_NR_HIDS_CLIENTS 1
 
 #define ENABLE_LE_SECURE_CONNECTIONS
+
+// https://bluekitchen-gmbh.com/blesa-gatt-client-vulnerabilities/
 #define ENABLE_LE_PROACTIVE_AUTHENTICATION
 
 // BTstack configuration. buffers, sizes, ...
